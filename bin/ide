@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# ide — open (or reattach to) a per-project tmux layout
+#
+#   ┌──────────────┬──────────┐
+#   │              │  claude  │
+#   │     nvim     ├──────────┤
+#   │              │  shell   │
+#   └──────────────┴──────────┘
+#
+# Usage:
+#   ide            # from anywhere inside a project
+#   ide ~/src/foo  # for a specific path
+#
+# Per-project overrides: an optional `.ide` file at the project root
+# can set any of these variables (it is sourced, i.e. executed — only
+# use it in repos you trust):
+#   editor_cmd="nvim"
+#   agent_cmd="claude"
+#   bottom_cmd="php artisan serve"   # empty = plain shell
+set -euo pipefail
+
+# 1. Resolve the project root: argument > git toplevel > the directory itself
+target=$(cd -- "${1:-$PWD}" && pwd -P)
+root=$(git -C "$target" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$target")
+
+# 2. Session name: sanitized dir name + short hash of the full path,
+#    so ~/work/api and ~/personal/api don't land in the same session
+name=$(basename -- "$root")
+name=${name//[^[:alnum:]_-]/_}
+hash=$(printf '%s' "$root" | cksum | awk '{ printf "%04x", $1 % 65536 }')
+session="${name}-${hash}"
+
+# 3. Defaults, then project overrides
+shell=${SHELL:-bash}
+editor_cmd="nvim"
+agent_cmd="claude"
+bottom_cmd=""
+[[ -f "$root/.ide" ]] && source "$root/.ide"
+
+# Run a command in a pane, then drop to an interactive shell when it exits
+keep() { printf "%s -ic '%s; exec %s'" "$shell" "$1" "$shell"; }
+
+# 4. Build the layout once. Pane IDs (%N) are used instead of indexes,
+#    so this works regardless of base-index / pane-base-index settings.
+if ! tmux has-session -t "=$session" 2>/dev/null; then
+  editor=$(tmux new-session -d -P -F '#{pane_id}' \
+    -s "$session" -n ide -c "$root" "$(keep "$editor_cmd")")
+
+  agent=$(tmux split-window -h -l 40% -P -F '#{pane_id}' \
+    -t "$editor" -c "$root" "$(keep "$agent_cmd")")
+
+  if [[ -n "$bottom_cmd" ]]; then
+    tmux split-window -v -l 35% -t "$agent" -c "$root" "$(keep "$bottom_cmd")"
+  else
+    tmux split-window -v -l 35% -t "$agent" -c "$root"
+  fi
+
+  tmux select-pane -t "$editor"
+fi
+
+# 5. Attach, or switch if we're already inside tmux
+if [[ -n "${TMUX:-}" ]]; then
+  tmux switch-client -t "=$session"
+else
+  tmux attach-session -t "=$session"
+fi
