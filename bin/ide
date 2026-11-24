@@ -17,6 +17,7 @@
 #   editor_cmd="nvim"
 #   agent_cmd="claude"
 #   bottom_cmd="php artisan serve"   # empty = plain shell
+#   ide_ps1='\W \$ '                 # minimal prompt (bash only; empty = keep yours)
 set -euo pipefail
 
 # 1. Resolve the project root: argument > git toplevel > the directory itself
@@ -35,10 +36,26 @@ shell=${SHELL:-bash}
 editor_cmd="nvim"
 agent_cmd="claude"
 bottom_cmd=""
+ide_ps1='\W \$ '
 [[ -f "$root/.ide" ]] && source "$root/.ide"
 
+# Minimal prompt: for bash, start shells with an rcfile that sources ~/.bashrc
+# and then forces PS1 after every prompt cycle (so frameworks like starship
+# or PROMPT_COMMAND-based themes can't override it).
+sh_cmd="$shell"
+if [[ -n "$ide_ps1" && "$(basename -- "$shell")" == bash ]]; then
+  rc="${XDG_CACHE_HOME:-$HOME/.cache}/ide/bashrc"
+  mkdir -p -- "$(dirname -- "$rc")"
+  {
+    echo '[ -f ~/.bashrc ] && . ~/.bashrc'
+    printf '__ide_ps1() { PS1=%q; }\n' "$ide_ps1"
+    echo 'PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}__ide_ps1"'
+  } > "$rc"
+  sh_cmd="$shell --rcfile $rc"
+fi
+
 # Run a command in a pane, then drop to an interactive shell when it exits
-keep() { printf "%s -ic '%s; exec %s'" "$shell" "$1" "$shell"; }
+keep() { printf "%s -ic '%s; exec %s'" "$sh_cmd" "$1" "$sh_cmd"; }
 
 # 4. Build the layout once. Pane IDs (%N) are used instead of indexes,
 #    so this works regardless of base-index / pane-base-index settings.
@@ -52,7 +69,7 @@ if ! tmux has-session -t "=$session" 2>/dev/null; then
   if [[ -n "$bottom_cmd" ]]; then
     tmux split-window -v -l 35% -t "$agent" -c "$root" "$(keep "$bottom_cmd")"
   else
-    tmux split-window -v -l 35% -t "$agent" -c "$root"
+    tmux split-window -v -l 35% -t "$agent" -c "$root" "$sh_cmd"
   fi
 
   tmux select-pane -t "$editor"
